@@ -1,23 +1,93 @@
 // wifi-monitor.js - Мониторинг Wi-Fi сетей на Node.js
-const { exec } = require('child_process');
-const fs = require('fs');
+const { execFile } = require('child_process');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 
 class WiFiMonitor {
   constructor(options = {}) {
-    this.interface = options.interface || 'wlp3s0';
-    this.interval = options.interval || 5000; // 5 секунд
-    this.outputDir = options.outputDir || './wifi_data';
-    this.format = options.format || 'both'; // 'csv', 'json', 'both'
+    // Валидация и установка параметров
+    this.interface = WiFiMonitor._validateInterface(options.interface || 'wlp3s0');
+    this.interval = WiFiMonitor._validateInterval(options.interval || 5000);
+    this.outputDir = WiFiMonitor._validateOutputDir(options.outputDir || './wifi_data');
+    this.format = WiFiMonitor._validateFormat(options.format || 'both');
     this.isMonitoring = false;
     this.scanCount = 0;
     this.successfulScans = 0;
     this.failedScans = 0;
     
-    // Создаем директорию для данных
-    if (!fs.existsSync(this.outputDir)) {
-      fs.mkdirSync(this.outputDir, { recursive: true });
+    // Создаем директорию для данных (синхронно, т.к. в конструкторе)
+    if (!fsSync.existsSync(this.outputDir)) {
+      fsSync.mkdirSync(this.outputDir, { recursive: true });
     }
+  }
+
+  /**
+   * Валидация имени интерфейса (защита от command injection)
+   * @param {string} iface - Имя интерфейса
+   * @returns {string} Валидированное имя интерфейса
+   * @private
+   */
+  static _validateInterface(iface) {
+    if (typeof iface !== 'string') {
+      throw new Error('Interface must be a string');
+    }
+    // Разрешаем только буквы, цифры, дефисы и подчеркивания
+    if (!/^[a-zA-Z0-9_-]+$/.test(iface)) {
+      throw new Error(`Invalid interface name: ${iface}. Only alphanumeric characters, dashes and underscores allowed.`);
+    }
+    if (iface.length > 16) {
+      throw new Error(`Interface name too long: ${iface}`);
+    }
+    return iface;
+  }
+
+  /**
+   * Валидация интервала сканирования
+   * @param {number} interval - Интервал в миллисекундах
+   * @returns {number} Валидированный интервал
+   * @private
+   */
+  static _validateInterval(interval) {
+    const num = parseInt(interval, 10);
+    if (isNaN(num) || num < 1000) {
+      throw new Error(`Invalid interval: ${interval}. Must be >= 1000ms (1 second).`);
+    }
+    if (num > 3600000) {
+      throw new Error(`Invalid interval: ${interval}. Must be <= 3600000ms (1 hour).`);
+    }
+    return num;
+  }
+
+  /**
+   * Валидация директории вывода
+   * @param {string} dir - Путь к директории
+   * @returns {string} Валидированный путь
+   * @private
+   */
+  static _validateOutputDir(dir) {
+    if (typeof dir !== 'string') {
+      throw new Error('Output directory must be a string');
+    }
+    // Базовая проверка на path traversal
+    if (dir.includes('..') || dir.includes('\0')) {
+      throw new Error(`Invalid output directory: ${dir}`);
+    }
+    return path.resolve(dir);
+  }
+
+  /**
+   * Валидация формата вывода
+   * @param {string} format - Формат ('csv', 'json', 'both')
+   * @returns {string} Валидированный формат
+   * @private
+   */
+  static _validateFormat(format) {
+    const validFormats = ['csv', 'json', 'both'];
+    if (!validFormats.includes(format)) {
+      throw new Error(`Invalid format: ${format}. Must be one of: ${validFormats.join(', ')}`);
+    }
+    return format;
   }
 
   /**
@@ -209,6 +279,18 @@ class WiFiMonitor {
   }
 
   /**
+   * Проверка существования интерфейса
+   * @returns {Promise<boolean>} true если интерфейс существует
+   */
+  async checkInterface() {
+    return new Promise((resolve) => {
+      execFile('iw', ['dev', this.interface, 'info'], { timeout: 3000 }, (error) => {
+        resolve(!error);
+      });
+    });
+  }
+
+  /**
    * Выполнение сканирования с retry
    * @param {number} retries - Количество попыток
    * @param {number} retryDelay - Задержка между попытками в мс
@@ -240,10 +322,11 @@ class WiFiMonitor {
    */
   async _performScan() {
     return new Promise((resolve, reject) => {
-      // ВАЖНО: Используем только interface, без других аргументов
-      const command = `sudo iw dev ${this.interface} scan`;
+      // ИСПРАВЛЕНО: Используем execFile для защиты от command injection
+      // Интерфейс уже валидирован в конструкторе
+      const args = ['dev', this.interface, 'scan'];
       
-      exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
+      execFile('sudo', ['iw', ...args], { timeout: 10000 }, (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Scan error: ${error.message}`));
           return;
@@ -273,12 +356,35 @@ class WiFiMonitor {
   }
 
   /**
+   * Безопасное экранирование CSV значений (защита от CSV injection)
+   * @param {any} value - Значение для экранирования
+   * @returns {string} Экранированное значение
+   * @private
+   */
+  _escapeCSVValue(value) {
+    if (value === undefined || value === null) return '';
+    const str = String(value);
+    
+    // Защита от CSV injection: если начинается с =, +, -, @, TAB - экранируем
+    if (/^[=+\-@\t]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    
+    // Экранируем кавычки и значения с запятыми/переносами строк
+    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    
+    return str;
+  }
+
+  /**
    * Сохранение в CSV
    * @param {Array} aps - Массив точек доступа
    * @param {boolean} append - Добавлять к существующему файлу
-   * @returns {string} Путь к файлу
+   * @returns {Promise<string>} Путь к файлу
    */
-  saveToCSV(aps, append = false) {
+  async saveToCSV(aps, append = false) {
     const csvPath = path.join(this.outputDir, 'wifi_scan.csv');
     const headers = [
       'timestamp', 'interface', 'bssid', 'ssid', 'freq_mhz', 
@@ -289,34 +395,45 @@ class WiFiMonitor {
 
     let content = '';
     
+    // Проверяем существование файла асинхронно
+    let fileExists = false;
+    try {
+      await fs.access(csvPath);
+      fileExists = true;
+    } catch {
+      fileExists = false;
+    }
+    
     // Добавляем заголовки если файл новый
-    if (!append || !fs.existsSync(csvPath)) {
+    if (!append || !fileExists) {
       content = headers.join(',') + '\n';
     }
 
-    // Добавляем данные
+    // Добавляем данные с безопасным экранированием
     for (const ap of aps) {
-      const row = headers.map(h => {
-        const val = ap[h];
-        if (val === undefined || val === null) return '';
-        // Экранируем значения с запятыми
-        const str = String(val);
-        return str.includes(',') ? `"${str}"` : str;
-      });
+      const row = headers.map(h => this._escapeCSVValue(ap[h]));
       content += row.join(',') + '\n';
     }
 
-    fs.appendFileSync(csvPath, content);
-    return csvPath;
+    try {
+      await fs.appendFile(csvPath, content, 'utf8');
+      return csvPath;
+    } catch (error) {
+      throw new Error(`Failed to write CSV file: ${error.message}`);
+    }
   }
 
   /**
    * Сохранение в JSON
    * @param {Array} aps - Массив точек доступа
-   * @returns {string} Путь к файлу
+   * @returns {Promise<string>} Путь к файлу
    */
-  saveToJSON(aps) {
+  async saveToJSON(aps) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    // Валидация имени файла для безопасности
+    if (!/^[0-9TZ\-]+$/.test(timestamp)) {
+      throw new Error('Invalid timestamp for filename');
+    }
     const jsonPath = path.join(this.outputDir, `wifi_scan_${timestamp}.json`);
     
     const data = {
@@ -327,8 +444,12 @@ class WiFiMonitor {
       access_points: aps
     };
 
-    fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2));
-    return jsonPath;
+    try {
+      await fs.writeFile(jsonPath, JSON.stringify(data, null, 2), 'utf8');
+      return jsonPath;
+    } catch (error) {
+      throw new Error(`Failed to write JSON file: ${error.message}`);
+    }
   }
 
   /**
@@ -342,15 +463,23 @@ class WiFiMonitor {
       const aps = await this.scan();
       console.log(`Найдено сетей: ${aps.length}`);
       
-      // Сохраняем данные
+      // Сохраняем данные асинхронно
       if (this.format === 'csv' || this.format === 'both') {
-        const csvPath = this.saveToCSV(aps, true);
-        console.log(`CSV: ${csvPath}`);
+        try {
+          const csvPath = await this.saveToCSV(aps, true);
+          console.log(`CSV: ${csvPath}`);
+        } catch (error) {
+          console.error(`⚠️  Ошибка сохранения CSV: ${error.message}`);
+        }
       }
       
       if (this.format === 'json' || this.format === 'both') {
-        const jsonPath = this.saveToJSON(aps);
-        console.log(`JSON: ${jsonPath}`);
+        try {
+          const jsonPath = await this.saveToJSON(aps);
+          console.log(`JSON: ${jsonPath}`);
+        } catch (error) {
+          console.error(`⚠️  Ошибка сохранения JSON: ${error.message}`);
+        }
       }
 
       this.scanCount++;
@@ -394,7 +523,7 @@ class WiFiMonitor {
     }
 
     console.log(`\n╔════════════════════════════════════════╗`);
-    console.log(`║       Wi-Fi Monitor v1.0               ║`);
+    console.log(`║       Wi-Fi Monitor v1.1.0             ║`);
     console.log(`╚════════════════════════════════════════╝`);
     console.log(`📡 Интерфейс: ${this.interface}`);
     console.log(`⏱️  Интервал: ${this.interval / 1000} сек`);
@@ -405,6 +534,16 @@ class WiFiMonitor {
     this.isMonitoring = true;
     this.failedScans = 0;
     this.successfulScans = 0;
+
+    // Проверка существования интерфейса
+    const interfaceExists = await this.checkInterface();
+    if (!interfaceExists) {
+      console.error(`\n❌ Ошибка: Интерфейс "${this.interface}" не найден или недоступен.`);
+      console.log('   Проверьте доступные интерфейсы: iw dev');
+      console.log('   Убедитесь, что интерфейс включен: sudo ip link set <interface> up\n');
+      this.isMonitoring = false;
+      process.exit(1);
+    }
 
     // Первое сканирование сразу
     try {
@@ -471,16 +610,65 @@ class WiFiMonitor {
   }
 
   /**
+   * Безопасный парсинг CSV строки (упрощенный, но защищенный)
+   * @param {string} line - CSV строка
+   * @returns {Array<string>} Массив значений
+   * @private
+   */
+  static _parseCSVLine(line) {
+    const values = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          // Экранированная кавычка
+          current += '"';
+          i++;
+        } else {
+          // Переключение состояния кавычек
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        values.push(current);
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    values.push(current);
+    return values;
+  }
+
+  /**
    * Анализ собранных CSV данных
    * @param {string} csvPath - Путь к CSV файлу
    */
-  static analyzeCSV(csvPath) {
-    if (!fs.existsSync(csvPath)) {
+  static async analyzeCSV(csvPath) {
+    // Валидация пути
+    if (typeof csvPath !== 'string' || csvPath.includes('..') || csvPath.includes('\0')) {
+      console.error('Invalid CSV file path');
+      return;
+    }
+
+    try {
+      await fs.access(csvPath);
+    } catch {
       console.error(`Файл не найден: ${csvPath}`);
       return;
     }
 
-    const content = fs.readFileSync(csvPath, 'utf8');
+    let content;
+    try {
+      content = await fs.readFile(csvPath, 'utf8');
+    } catch (error) {
+      console.error(`Ошибка чтения файла: ${error.message}`);
+      return;
+    }
+
     const lines = content.split('\n').filter(l => l.trim());
     
     if (lines.length < 2) {
@@ -488,12 +676,17 @@ class WiFiMonitor {
       return;
     }
 
-    const headers = lines[0].split(',');
+    const headers = WiFiMonitor._parseCSVLine(lines[0]);
     
     const data = lines.slice(1).map(line => {
-      const values = line.split(',');
+      const values = WiFiMonitor._parseCSVLine(line);
       return headers.reduce((obj, header, i) => {
-        obj[header] = values[i];
+        // Удаляем кавычки и экранирование
+        let value = values[i] || '';
+        if (value.startsWith('"') && value.endsWith('"')) {
+          value = value.slice(1, -1).replace(/""/g, '"');
+        }
+        obj[header] = value;
         return obj;
       }, {});
     });
@@ -595,7 +788,7 @@ if (require.main === module) {
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
 ╔════════════════════════════════════════════════════════════╗
-║              Wi-Fi Network Monitor v1.0                    ║
+║              Wi-Fi Network Monitor v1.1.0                  ║
 ╚════════════════════════════════════════════════════════════╝
 
 ИСПОЛЬЗОВАНИЕ:
@@ -653,8 +846,12 @@ if (require.main === module) {
       console.log('Пример: node wifi-monitor.js --analyze ./wifi_data/wifi_scan.csv');
       process.exit(1);
     }
-    WiFiMonitor.analyzeCSV(csvFile);
-    process.exit(0);
+    WiFiMonitor.analyzeCSV(csvFile)
+      .then(() => process.exit(0))
+      .catch(err => {
+        console.error('Ошибка анализа:', err.message);
+        process.exit(1);
+      });
   }
 
   // Одно сканирование

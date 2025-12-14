@@ -30,10 +30,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/wifi-monitor.git"
+    "url": "https://github.com/x53e76f0f/wifi-monitor.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/wifi-monitor/issues"
+    "url": "https://github.com/x53e76f0f/wifi-monitor/issues"
   },
   "os": [
     "linux"
