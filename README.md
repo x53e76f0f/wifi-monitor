@@ -59,7 +59,7 @@ iw --version
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/yourusername/wifi-monitor.git
+git clone https://github.com/x53e76f0f/wifi-monitor.git
 cd wifi-monitor
 
 # Установка зависимостей (если потребуются в будущем)

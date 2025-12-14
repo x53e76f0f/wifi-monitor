@@ -11,6 +11,8 @@ class WiFiMonitor {
     this.format = options.format || 'both'; // 'csv', 'json', 'both'
     this.isMonitoring = false;
     this.scanCount = 0;
+    this.successfulScans = 0;
+    this.failedScans = 0;
     
     // Создаем директорию для данных
     if (!fs.existsSync(this.outputDir)) {
@@ -18,7 +20,11 @@ class WiFiMonitor {
     }
   }
 
-  // Парсинг вывода iw scan
+  /**
+   * Парсинг вывода iw scan
+   * @param {string} output - Вывод команды iw scan
+   * @returns {Array} Массив точек доступа
+   */
   parseIwScan(output) {
     const aps = [];
     const lines = output.split('\n');
@@ -138,16 +144,45 @@ class WiFiMonitor {
     return aps;
   }
 
-  // Выполнение сканирования
-  async scan() {
+  /**
+   * Выполнение сканирования с retry
+   * @param {number} retries - Количество попыток
+   * @param {number} retryDelay - Задержка между попытками в мс
+   * @returns {Promise<Array>} Массив точек доступа
+   */
+  async scan(retries = 3, retryDelay = 1000) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const aps = await this._performScan();
+        return aps;
+      } catch (error) {
+        const isBusy = error.message.includes('Device or resource busy');
+        
+        if (isBusy && attempt < retries) {
+          console.warn(`⚠️  Интерфейс занят, попытка ${attempt}/${retries}. Ожидание ${retryDelay}мс...`);
+          await this._sleep(retryDelay);
+          continue;
+        }
+        
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Внутренний метод выполнения сканирования
+   * @returns {Promise<Array>} Массив точек доступа
+   * @private
+   */
+  async _performScan() {
     return new Promise((resolve, reject) => {
-      exec(`sudo iw dev ${this.interface} scan`, (error, stdout, stderr) => {
+      exec(`sudo iw dev ${this.interface} scan`, { timeout: 10000 }, (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Scan error: ${error.message}`));
           return;
         }
-        if (stderr) {
-          console.warn('Scan warning:', stderr);
+        if (stderr && !stderr.includes('BSS')) {
+          console.warn('⚠️  Scan warning:', stderr);
         }
         
         try {
@@ -160,7 +195,22 @@ class WiFiMonitor {
     });
   }
 
-  // Сохранение в CSV
+  /**
+   * Вспомогательная функция задержки
+   * @param {number} ms - Миллисекунды
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Сохранение в CSV
+   * @param {Array} aps - Массив точек доступа
+   * @param {boolean} append - Добавлять к существующему файлу
+   * @returns {string} Путь к файлу
+   */
   saveToCSV(aps, append = false) {
     const csvPath = path.join(this.outputDir, 'wifi_scan.csv');
     const headers = [
@@ -192,7 +242,11 @@ class WiFiMonitor {
     return csvPath;
   }
 
-  // Сохранение в JSON
+  /**
+   * Сохранение в JSON
+   * @param {Array} aps - Массив точек доступа
+   * @returns {string} Путь к файлу
+   */
   saveToJSON(aps) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const jsonPath = path.join(this.outputDir, `wifi_scan_${timestamp}.json`);
@@ -209,7 +263,10 @@ class WiFiMonitor {
     return jsonPath;
   }
 
-  // Одиночное сканирование
+  /**
+   * Одиночное сканирование
+   * @returns {Promise<Array>} Массив точек доступа
+   */
   async scanOnce() {
     console.log(`\n[${new Date().toLocaleString()}] Сканирование...`);
     
@@ -239,7 +296,9 @@ class WiFiMonitor {
       if (sorted.length > 0) {
         console.log('\nТоп-5 сильных сигналов:');
         sorted.forEach((ap, i) => {
-          console.log(`  ${i + 1}. ${ap.ssid || '(hidden)'} - ${ap.signal_dbm} dBm - ${ap.bssid}`);
+          const ssid = ap.ssid || '(hidden)';
+          const security = ap.security ? `[${ap.security.trim()}]` : '[OPEN]';
+          console.log(`  ${i + 1}. ${ssid} ${security} - ${ap.signal_dbm} dBm - Ch ${ap.channel || '?'}`);
         });
       }
 
@@ -250,29 +309,61 @@ class WiFiMonitor {
     }
   }
 
-  // Запуск мониторинга
+  /**
+   * Запуск мониторинга
+   */
   async startMonitoring() {
     if (this.isMonitoring) {
-      console.log('Мониторинг уже запущен!');
+      console.log('⚠️  Мониторинг уже запущен!');
       return;
     }
 
-    console.log(`\n=== Wi-Fi Monitor ===`);
-    console.log(`Интерфейс: ${this.interface}`);
-    console.log(`Интервал: ${this.interval / 1000} сек`);
-    console.log(`Формат: ${this.format}`);
-    console.log(`Выходная директория: ${this.outputDir}`);
-    console.log(`\nНажмите Ctrl+C для остановки...\n`);
+    // Предупреждение о малом интервале
+    if (this.interval < 3000) {
+      console.log(`\n⚠️  ВНИМАНИЕ: Интервал ${this.interval}мс слишком мал!`);
+      console.log('   Рекомендуется >= 3000мс для стабильной работы.');
+      console.log('   Слишком частые сканирования могут вызывать ошибки "Device busy".\n');
+    }
+
+    console.log(`\n╔════════════════════════════════════════╗`);
+    console.log(`║       Wi-Fi Monitor v1.0               ║`);
+    console.log(`╚════════════════════════════════════════╝`);
+    console.log(`📡 Интерфейс: ${this.interface}`);
+    console.log(`⏱️  Интервал: ${this.interval / 1000} сек`);
+    console.log(`💾 Формат: ${this.format}`);
+    console.log(`📁 Выходная директория: ${this.outputDir}`);
+    console.log(`\n⌨️  Нажмите Ctrl+C для остановки...\n`);
 
     this.isMonitoring = true;
+    this.failedScans = 0;
+    this.successfulScans = 0;
 
     // Первое сканирование сразу
-    await this.scanOnce();
+    try {
+      await this.scanOnce();
+      this.successfulScans++;
+    } catch (error) {
+      this.failedScans++;
+    }
 
     // Последующие сканирования по интервалу
     this.monitoringInterval = setInterval(async () => {
       if (this.isMonitoring) {
-        await this.scanOnce();
+        try {
+          await this.scanOnce();
+          this.successfulScans++;
+        } catch (error) {
+          this.failedScans++;
+          
+          // Если слишком много неудач подряд - предупреждаем
+          if (this.failedScans > 5 && this.successfulScans === 0) {
+            console.log(`\n⚠️  Слишком много неудачных сканирований (${this.failedScans}).`);
+            console.log('   Возможные причины:');
+            console.log('   • NetworkManager занимает интерфейс');
+            console.log('   • Слишком короткий интервал сканирования');
+            console.log('   • Проблемы с драйвером Wi-Fi\n');
+          }
+        }
       }
     }, this.interval);
 
@@ -282,26 +373,53 @@ class WiFiMonitor {
     });
   }
 
-  // Остановка мониторинга
+  /**
+   * Остановка мониторинга
+   */
   stopMonitoring() {
     if (!this.isMonitoring) return;
 
-    console.log('\n\nОстановка мониторинга...');
+    console.log('\n\n╔════════════════════════════════════════╗');
+    console.log('║    Остановка мониторинга...            ║');
+    console.log('╚════════════════════════════════════════╝');
+    
     this.isMonitoring = false;
     
     if (this.monitoringInterval) {
       clearInterval(this.monitoringInterval);
     }
 
-    console.log(`Всего выполнено сканирований: ${this.scanCount}`);
-    console.log(`Данные сохранены в: ${this.outputDir}`);
+    const total = this.successfulScans + this.failedScans;
+    const successRate = total > 0 ? ((this.successfulScans / total) * 100).toFixed(1) : 0;
+
+    console.log(`\n📊 Статистика:`);
+    console.log(`   Всего сканирований: ${total}`);
+    console.log(`   ✓ Успешных: ${this.successfulScans}`);
+    console.log(`   ✗ Неудачных: ${this.failedScans}`);
+    console.log(`   📈 Успешность: ${successRate}%`);
+    console.log(`\n💾 Данные сохранены в: ${this.outputDir}`);
+    
     process.exit(0);
   }
 
-  // Анализ собранных данных
+  /**
+   * Анализ собранных CSV данных
+   * @param {string} csvPath - Путь к CSV файлу
+   */
   static analyzeCSV(csvPath) {
+    if (!fs.existsSync(csvPath)) {
+      console.error(`Файл не найден: ${csvPath}`);
+      return;
+    }
+
     const content = fs.readFileSync(csvPath, 'utf8');
     const lines = content.split('\n').filter(l => l.trim());
+    
+    if (lines.length < 2) {
+      console.log('Недостаточно данных для анализа');
+      return;
+    }
+
     const headers = lines[0].split(',');
     
     const data = lines.slice(1).map(line => {
@@ -312,7 +430,10 @@ class WiFiMonitor {
       }, {});
     });
 
-    console.log('\n=== Анализ данных ===');
+    console.log('\n╔════════════════════════════════════════╗');
+    console.log('║         АНАЛИЗ ДАННЫХ Wi-Fi           ║');
+    console.log('╚════════════════════════════════════════╝\n');
+    
     console.log(`Всего записей: ${data.length}`);
     
     // Уникальные SSID
@@ -324,24 +445,34 @@ class WiFiMonitor {
     data.forEach(row => {
       if (row.ssid && row.signal_dbm) {
         if (!signalBySSID[row.ssid]) {
-          signalBySSID[row.ssid] = { sum: 0, count: 0 };
+          signalBySSID[row.ssid] = { sum: 0, count: 0, min: 999, max: -999 };
         }
-        signalBySSID[row.ssid].sum += parseFloat(row.signal_dbm);
+        const sig = parseFloat(row.signal_dbm);
+        signalBySSID[row.ssid].sum += sig;
         signalBySSID[row.ssid].count++;
+        signalBySSID[row.ssid].min = Math.min(signalBySSID[row.ssid].min, sig);
+        signalBySSID[row.ssid].max = Math.max(signalBySSID[row.ssid].max, sig);
       }
     });
 
-    console.log('\nСредний сигнал по сетям:');
+    console.log('\n┌─────────────────────────────────────────┐');
+    console.log('│  Топ-10 сетей по среднему сигналу       │');
+    console.log('├─────────────────────────────────────────┤');
     Object.entries(signalBySSID)
       .map(([ssid, stats]) => ({
         ssid,
-        avg: (stats.sum / stats.count).toFixed(2)
+        avg: (stats.sum / stats.count).toFixed(2),
+        min: stats.min.toFixed(2),
+        max: stats.max.toFixed(2),
+        count: stats.count
       }))
       .sort((a, b) => b.avg - a.avg)
       .slice(0, 10)
-      .forEach(({ ssid, avg }) => {
-        console.log(`  ${ssid}: ${avg} dBm`);
+      .forEach(({ ssid, avg, min, max, count }, i) => {
+        const name = ssid.padEnd(20).substring(0, 20);
+        console.log(`│ ${(i + 1).toString().padStart(2)}. ${name} ${avg.padStart(6)} dBm (${min}..${max}) │`);
       });
+    console.log('└─────────────────────────────────────────┘');
 
     // Распределение по каналам
     const channels = {};
@@ -351,24 +482,54 @@ class WiFiMonitor {
       }
     });
 
-    console.log('\nИнтерференция (записей на канал):');
+    console.log('\n┌─────────────────────────────────────────┐');
+    console.log('│  Интерференция (записей на канал)      │');
+    console.log('├─────────────────────────────────────────┤');
     Object.entries(channels)
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
       .forEach(([ch, count]) => {
-        console.log(`  Канал ${ch}: ${count} записей`);
+        const bar = '█'.repeat(Math.min(count / 10, 30));
+        console.log(`│ Канал ${ch.padStart(2)}: ${count.toString().padStart(4)} ${bar.padEnd(30)} │`);
       });
+    console.log('└─────────────────────────────────────────┘');
+
+    // Безопасность
+    const security = {};
+    data.forEach(row => {
+      const sec = row.security ? row.security.trim() : 'OPEN';
+      security[sec] = (security[sec] || 0) + 1;
+    });
+
+    console.log('\n┌─────────────────────────────────────────┐');
+    console.log('│  Распределение по типу безопасности     │');
+    console.log('├─────────────────────────────────────────┤');
+    Object.entries(security)
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([sec, count]) => {
+        const name = sec.padEnd(15).substring(0, 15);
+        console.log(`│ ${name}: ${count.toString().padStart(4)} записей               │`);
+      });
+    console.log('└─────────────────────────────────────────┘\n');
   }
 }
 
+// ============================================================
 // CLI интерфейс
+// ============================================================
+
 if (require.main === module) {
   const args = process.argv.slice(2);
   
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
-Использование: node wifi-monitor.js [опции]
+╔════════════════════════════════════════════════════════════╗
+║              Wi-Fi Network Monitor v1.0                    ║
+╚════════════════════════════════════════════════════════════╝
 
-Опции:
+ИСПОЛЬЗОВАНИЕ:
+  node wifi-monitor.js [опции]
+
+ОПЦИИ:
   --interface, -i <name>   Сетевой интерфейс (по умолчанию: wlp3s0)
   --interval, -t <ms>      Интервал сканирования в мс (по умолчанию: 5000)
   --output, -o <dir>       Директория для сохранения (по умолчанию: ./wifi_data)
@@ -377,11 +538,28 @@ if (require.main === module) {
   --analyze <file>         Анализировать CSV файл
   --help, -h               Показать эту справку
 
-Примеры:
+ПРИМЕРЫ:
+  # Непрерывный мониторинг с настройками по умолчанию
   node wifi-monitor.js
+
+  # Использование другого интерфейса и интервала
   node wifi-monitor.js --interface wlan0 --interval 10000 --format csv
+
+  # Одно сканирование
   node wifi-monitor.js --once
+
+  # Анализ собранных данных
   node wifi-monitor.js --analyze ./wifi_data/wifi_scan.csv
+
+ТРЕБОВАНИЯ:
+  - Linux с установленным iw
+  - sudo права для выполнения iw scan
+  - Node.js >= 12.0.0
+
+ДАННЫЕ:
+  Собираемые параметры: BSSID, SSID, частота, канал, уровень сигнала,
+  безопасность (WPA/WPA2/WPA3), стандарты Wi-Fi (802.11n/ac/ax),
+  beacon interval, country code и др.
     `);
     process.exit(0);
   }
@@ -399,7 +577,8 @@ if (require.main === module) {
   if (args.includes('--analyze')) {
     const csvFile = args[args.indexOf('--analyze') + 1];
     if (!csvFile) {
-      console.error('Укажите путь к CSV файлу');
+      console.error('Ошибка: Укажите путь к CSV файлу');
+      console.log('Пример: node wifi-monitor.js --analyze ./wifi_data/wifi_scan.csv');
       process.exit(1);
     }
     WiFiMonitor.analyzeCSV(csvFile);
@@ -421,59 +600,3 @@ if (require.main === module) {
 }
 
 module.exports = WiFiMonitor;
-
-// ===== package.json =====
-/*
-{
-  "name": "wifi-monitor",
-  "version": "1.0.0",
-  "description": "Wi-Fi network monitoring tool using iw scan",
-  "main": "wifi-monitor.js",
-  "scripts": {
-    "start": "node wifi-monitor.js",
-    "scan": "node wifi-monitor.js --once",
-    "analyze": "node wifi-monitor.js --analyze ./wifi_data/wifi_scan.csv"
-  },
-  "keywords": ["wifi", "monitoring", "iw", "scan", "network"],
-  "author": "",
-  "license": "MIT"
-}
-*/
-
-// ===== Пример использования как модуля =====
-/*
-const WiFiMonitor = require('./wifi-monitor');
-
-// Создание монитора
-const monitor = new WiFiMonitor({
-  interface: 'wlp3s0',
-  interval: 5000,
-  outputDir: './wifi_data',
-  format: 'both' // 'csv', 'json', 'both'
-});
-
-// Одиночное сканирование
-async function singleScan() {
-  try {
-    const aps = await monitor.scanOnce();
-    console.log(`Найдено ${aps.length} точек доступа`);
-    
-    // Работа с результатами
-    aps.forEach(ap => {
-      console.log(`${ap.ssid || '(hidden)'}: ${ap.signal_dbm} dBm`);
-    });
-  } catch (error) {
-    console.error('Ошибка:', error);
-  }
-}
-
-// Непрерывный мониторинг
-async function continuousMonitoring() {
-  await monitor.startMonitoring();
-}
-
-// Анализ собранных данных
-function analyzeData() {
-  WiFiMonitor.analyzeCSV('./wifi_data/wifi_scan.csv');
-}
-*/

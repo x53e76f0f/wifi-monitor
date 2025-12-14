@@ -1,13 +1,14 @@
 {
   "name": "wifi-monitor",
-  "version": "1.0.0",
-  "description": "Wi-Fi network monitoring tool using iw scan for Linux systems",
+  "version": "1.1.0",
+  "description": "Wi-Fi network monitoring tool with distance estimation using iw scan for Linux systems",
   "main": "wifi-monitor.js",
   "scripts": {
     "start": "node wifi-monitor.js",
     "scan": "node wifi-monitor.js --once",
     "analyze": "node wifi-monitor.js --analyze ./wifi_data/wifi_scan.csv",
-    "help": "node wifi-monitor.js --help"
+    "help": "node wifi-monitor.js --help",
+    "example": "node example.js"
   },
   "keywords": [
     "wifi",
@@ -17,7 +18,10 @@
     "network",
     "wireless",
     "signal",
-    "linux"
+    "linux",
+    "rssi",
+    "distance",
+    "fspl"
   ],
   "author": "",
   "license": "MIT",
