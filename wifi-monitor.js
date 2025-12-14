@@ -21,6 +21,46 @@ class WiFiMonitor {
   }
 
   /**
+   * Расчет приблизительного расстояния до точки доступа
+   * Использует формулу Free Space Path Loss (FSPL)
+   * 
+   * ВАЖНО: Точность ±5-10 метров в открытом пространстве,
+   * еще хуже в помещениях из-за препятствий и отражений
+   * 
+   * @param {number} rssi - Уровень сигнала в dBm
+   * @param {number} frequency - Частота в MHz
+   * @param {number} txPower - Мощность передатчика в dBm (по умолчанию 20)
+   * @param {number} n - Коэффициент затухания среды (2-4)
+   * @returns {object} Объект с мин/макс расстоянием
+   */
+  static calculateDistance(rssi, frequency, txPower = 20, n = 3) {
+    // Базовый расчет: Distance = 10^((TX_Power - RSSI) / (10 * n))
+    const pathLoss = txPower - rssi;
+    const baseDistance = Math.pow(10, pathLoss / (10 * n));
+    
+    // Более точный расчет с учетом частоты (опционально)
+    // FSPL = 20*log10(distance) + 20*log10(freq_MHz) + 32.44
+    const fspl = pathLoss;
+    const freqMHz = frequency;
+    const distanceFromFSPL = Math.pow(10, (fspl - 20 * Math.log10(freqMHz) - 32.44) / 20);
+    
+    // Используем среднее и даем диапазон
+    const avgDistance = (baseDistance + distanceFromFSPL) / 2;
+    
+    // Диапазон неопределенности (±40% для помещений)
+    const uncertainty = 0.4;
+    const minDistance = avgDistance * (1 - uncertainty);
+    const maxDistance = avgDistance * (1 + uncertainty);
+    
+    return {
+      estimated: parseFloat(avgDistance.toFixed(1)),
+      min: parseFloat(minDistance.toFixed(1)),
+      max: parseFloat(maxDistance.toFixed(1)),
+      accuracy: 'low' // low/medium/high
+    };
+  }
+
+  /**
    * Парсинг вывода iw scan
    * @param {string} output - Вывод команды iw scan
    * @returns {Array} Массив точек доступа
@@ -37,6 +77,18 @@ class WiFiMonitor {
       if (bssMatch) {
         if (currentAp && bssid) {
           currentAp.bssid = bssid;
+          
+          // Расчет расстояния если есть все данные
+          if (currentAp.signal_dbm && currentAp.freq_mhz) {
+            const distance = WiFiMonitor.calculateDistance(
+              currentAp.signal_dbm,
+              currentAp.freq_mhz
+            );
+            currentAp.distance_meters = distance.estimated;
+            currentAp.distance_min = distance.min;
+            currentAp.distance_max = distance.max;
+          }
+          
           aps.push(currentAp);
         }
         currentAp = {
@@ -138,6 +190,18 @@ class WiFiMonitor {
     // Добавляем последнюю AP
     if (currentAp && bssid) {
       currentAp.bssid = bssid;
+      
+      // Расчет расстояния если есть все данные
+      if (currentAp.signal_dbm && currentAp.freq_mhz) {
+        const distance = WiFiMonitor.calculateDistance(
+          currentAp.signal_dbm,
+          currentAp.freq_mhz
+        );
+        currentAp.distance_meters = distance.estimated;
+        currentAp.distance_min = distance.min;
+        currentAp.distance_max = distance.max;
+      }
+      
       aps.push(currentAp);
     }
 
@@ -176,7 +240,10 @@ class WiFiMonitor {
    */
   async _performScan() {
     return new Promise((resolve, reject) => {
-      exec(`sudo iw dev ${this.interface} scan`, { timeout: 10000 }, (error, stdout, stderr) => {
+      // ВАЖНО: Используем только interface, без других аргументов
+      const command = `sudo iw dev ${this.interface} scan`;
+      
+      exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Scan error: ${error.message}`));
           return;
@@ -215,8 +282,9 @@ class WiFiMonitor {
     const csvPath = path.join(this.outputDir, 'wifi_scan.csv');
     const headers = [
       'timestamp', 'interface', 'bssid', 'ssid', 'freq_mhz', 
-      'channel', 'signal_dbm', 'last_seen_ms', 'capability', 
-      'security', 'beacon_interval', 'country', 'ht_cap', 'vht_cap', 'he_cap'
+      'channel', 'signal_dbm', 'distance_meters', 'distance_min', 'distance_max',
+      'last_seen_ms', 'capability', 'security', 'beacon_interval', 
+      'country', 'ht_cap', 'vht_cap', 'he_cap'
     ];
 
     let content = '';
@@ -470,9 +538,13 @@ class WiFiMonitor {
       .slice(0, 10)
       .forEach(({ ssid, avg, min, max, count }, i) => {
         const name = ssid.padEnd(20).substring(0, 20);
-        console.log(`│ ${(i + 1).toString().padStart(2)}. ${name} ${avg.padStart(6)} dBm (${min}..${max}) │`);
+        // Примерное расстояние от среднего сигнала
+        const avgDist = WiFiMonitor.calculateDistance(parseFloat(avg), 2437);
+        const distStr = `~${avgDist.estimated}m`.padStart(6);
+        console.log(`│ ${(i + 1).toString().padStart(2)}. ${name} ${avg.padStart(6)} dBm ${distStr} │`);
       });
     console.log('└─────────────────────────────────────────┘');
+    console.log('  ⚠️  Расстояния приблизительные (для 2.4GHz)');
 
     // Распределение по каналам
     const channels = {};
